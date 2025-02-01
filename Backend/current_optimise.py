@@ -1,81 +1,250 @@
+import pandas as pd
+from datetime import datetime
+
 from typing import List
-import csv
 
-WILDFIRE_FILENAME = 'Data/current_wildfiredata.csv'
-SEVERITY_COLUMNNAME = 'severity'
+DATA_FILENAME = 'Data/current_wildfiredata.csv'
 
-damage_cost = {
-    'low': 50000,
-    'medium': 100000,
-    'high': 200000
+# -------------------------------
+# Define our firefighting resources
+# -------------------------------
+# Each resource type is defined by its name, deployment time (in minutes),
+# operational cost per deployment, and total units available.
+resource_specs = {
+    "Smoke Jumpers": {"deployment_minutes": 30, "operational_cost": 5000, "count": 5},
+    "Fire Engines": {"deployment_minutes": 60, "operational_cost": 2000, "count": 10},
+    "Helicopters": {"deployment_minutes": 45, "operational_cost": 8000, "count": 3},
+    "Tanker Planes": {"deployment_minutes": 120, "operational_cost": 15000, "count": 2},
+    "Ground Crews": {"deployment_minutes": 90, "operational_cost": 3000, "count": 8}
 }
 
-def get_severity_list() -> list[int]:
+# Damage costs for missed responses (if no resource is available)
+damage_costs = {
+    "low": 50000,
+    "medium": 100000,
+    "high": 200000
+}
+
+# -------------------------------
+# Create a pool of resource units (non-reusable)
+# -------------------------------
+# Each unit is represented as a dictionary.
+resource_pool = []
+for r_type, spec in resource_specs.items():
+    for _ in range(spec["count"]):
+        resource_pool.append({
+            "resource_type": r_type,
+            "deployment_minutes": spec["deployment_minutes"],
+            "operational_cost": spec["operational_cost"]
+        })
+
+# -------------------------------
+# Heuristic for selecting a resource for a given event
+# -------------------------------
+
+
+def select_resource(available_resources, severity):
     """
-    Reads data in WILDFIRE_FILENAME returns a list of the severity in the order that occurs
-    We are assuming that the list is in chronological order
-    
-    Returns:
-        list: A list containing the damage cost of the fires in current wild fire data
-        
-    Raises:
-        FileNotFoundError: If the CSV file does not exist.
-        ValueError: If the column name does not exist in the CSV.
+    Given a list of available resource units and the event severity,
+    select one unit based on a severity-dependent heuristic.
+
+    For high severity: choose the fastest (smallest deployment_minutes) unit.
+    For low severity: choose the cheapest unit.
+    For medium severity: choose based on a weighted score that combines deployment_minutes
+        and operational_cost.
     """
-    severity_data = []
-    
-    with open(WILDFIRE_FILENAME, mode='r', newline='', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
-        
-        if SEVERITY_COLUMNNAME not in reader.fieldnames:
-            raise ValueError(f"Column '{SEVERITY_COLUMNNAME}' not found in the CSV file.")
-        
-        for row in reader:
-            severity_data.append(damage_cost[row[SEVERITY_COLUMNNAME]])
-    
-    return severity_data
+    if severity == "high":
+        available_resources.sort(key=lambda r: (
+            r["deployment_minutes"], r["operational_cost"]))
+        return available_resources[0]
+    elif severity == "low":
+        available_resources.sort(key=lambda r: (
+            r["operational_cost"], r["deployment_minutes"]))
+        return available_resources[0]
+    elif severity == "medium":
+        factor = 50  # factor to convert minutes to an equivalent cost
+        available_resources.sort(key=lambda r: (
+            r["operational_cost"] + factor * r["deployment_minutes"]))
+        return available_resources[0]
+    else:
+        available_resources.sort(key=lambda r: (
+            r["operational_cost"], r["deployment_minutes"]))
+        return available_resources[0]
 
-def get_units() -> list[int]:
-    units = []
-    
-    num_smoke_jumper = 5
-    # depTime_smoke_jumper = 0.5
-    cost_smoke_jumper = 5000
-    for _ in num_smoke_jumper:
-        units.append(cost_smoke_jumper)
-
-    num_fire_engine = 10
-    # depTime_fire_engine = 1
-    cost_fire_engine = 2000
-    for _ in num_fire_engine:
-        units.append(cost_fire_engine)
-
-    num_helicopters = 3
-    # depTime_helicopters = 0.75
-    cost_helicopters = 8000
-    for _ in num_helicopters:
-        units.append(cost_helicopters)
-
-    num_tanker_planes = 2
-    # depTime_tanker_planes = 2
-    cost_tanker_planes = 15000
-    for _ in num_tanker_planes:
-        units.append(cost_tanker_planes)
-
-    num_ground_crew = 8
-    # depTime_ground_crew = 1.5
-    cost_ground_crew = 3000
-    for _ in num_ground_crew:
-        units.append(cost_ground_crew)
-
-    return units
-
-def give_optimal_cost(severity_data: list[int]) -> int:
-    total_cost = severity_data
+# -------------------------------
+# Simulation of resource deployment (non-reusable units) with logging
+# and with an intentional miss policy for the first few low-severity events.
+# -------------------------------
 
 
+def simulate_deployment(df_events, allowed_low_misses):
+    """
+    Given a dataframe of wildfire events (with columns: timestamp, fire_start_time, location, severity),
+    simulate resource assignment. Each resource is used only once.
+
+    Policy change: For low severity events, intentionally "miss" (i.e. do not assign a resource)
+    for the first `allowed_low_misses` occurrences, even if a resource is available.
+
+    Returns a summary report and a list of incident logs.
+    """
+    # Convert timestamp columns to datetime objects
+    df_events['timestamp'] = pd.to_datetime(df_events['timestamp'])
+    df_events['fire_start_time'] = pd.to_datetime(df_events['fire_start_time'])
+
+    # Sort events by report time; if same time, then high severity events
+    # first.
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    df_events.sort_values(
+        by=["timestamp", "severity"],
+        key=lambda col: col.map(
+            severity_order) if col.name == "severity" else col,
+        inplace=True
+    )
+
+    total_operational_cost = 0
+    total_damage_cost = 0
+    addressed_count = 0
+    missed_count = 0
+
+    # Counters per severity:
+    addressed_by_severity = {"low": 0, "medium": 0, "high": 0}
+    missed_by_severity = {"low": 0, "medium": 0, "high": 0}
+
+    # Policy: keep track of how many low severity events have been
+    # intentionally missed.
+    low_missed_count = 0
+
+    # Create a copy of the resource pool
+    available_resources = resource_pool.copy()
+
+    # List to log each incident
+    incident_logs = []
+
+    # Process each event one by one
+    for idx, event in df_events.iterrows():
+        severity = event['severity'].lower()  # ensure lower-case
+        event_time = event['timestamp']
+        location = event.get('location', 'Unknown')
+
+        log_entry = {
+            "event_index": idx,
+            "timestamp": event_time,
+            "severity": severity,
+            "location": location,
+            "action": None,  # Will be updated below
+            "resource": None,  # The unit assigned (if any)
+            "operational_cost": 0
+        }
+
+        # --- Intentional miss policy for low severity events ---
+        if severity == "low" and low_missed_count < allowed_low_misses:
+            low_missed_count += 1
+            missed_count += 1
+            total_damage_cost += damage_costs.get(severity, 0)
+            missed_by_severity[severity] += 1
+            log_entry["action"] = f"Missed (allowed low miss #{low_missed_count})"
+            incident_logs.append(log_entry)
+            continue
+
+        # Normal processing: assign a resource if available
+        if not available_resources:
+            # No resource available; mark as missed response
+            missed_count += 1
+            total_damage_cost += damage_costs.get(severity, 0)
+            missed_by_severity[severity] += 1
+            log_entry["action"] = "Missed (no resources)"
+        else:
+            # Select a resource unit using the severity-dependent heuristic
+            selected = select_resource(available_resources, severity)
+            # Non-reusable: remove from pool
+            available_resources.remove(selected)
+            total_operational_cost += selected["operational_cost"]
+            addressed_count += 1
+            addressed_by_severity[severity] += 1
+            log_entry["action"] = "Assigned"
+            log_entry["resource"] = selected["resource_type"]
+            log_entry["operational_cost"] = selected["operational_cost"]
+
+        incident_logs.append(log_entry)
+
+    # Prepare the summary report dictionary
+    report = {
+        "fires_addressed": addressed_by_severity,
+        "fires_delayed": missed_by_severity,
+        "operational_costs": total_operational_cost,
+        "estimated_damage_costs": total_damage_cost,
+    }
+
+    return report, incident_logs
+
+# -------------------------------
+# Function to print incident details
+# -------------------------------
 
 
-if __name__ == '__main__':
-    severity_data = get_severity_list()
-    print(severity_data)
+def print_incident_report(incident_logs):
+    """
+    Given a list of incident logs, print details for each event.
+    """
+    print("\n----- Detailed Incident Report -----")
+    for log in incident_logs:
+        event_info = (
+            f"Event {
+                log['event_index']} | Time: {
+                log['timestamp']} | " f"Severity: {
+                log['severity'].capitalize()} | Location: {
+                    log['location']}")
+        if log["action"].startswith("Assigned"):
+            unit_info = f"--> Assigned Unit: {
+                log['resource']} (Cost: ${
+                log['operational_cost']})"
+        else:
+            unit_info = f"--> {log['action']}"
+        print(f"{event_info} {unit_info}")
+
+
+def print_summary_report(report):
+    """
+    Prints the wildfire response summary report in a structured format.
+
+    Args:
+        report (dict): A dictionary containing fire response data.
+    """
+    print("----- Wildfire Response Report -----")
+    print("Fires Addressed:")
+    for severity, count in report["fires_addressed"].items():
+        print(f"  {severity.capitalize()}: {count}")
+
+    print("\nFires Delayed:")
+    for severity, count in report["fires_delayed"].items():
+        print(f"  {severity.capitalize()}: {count}")
+
+    print(f"\nTotal Operational Costs: ${report['operational_costs']:,.2f}")
+    print(
+        f"Estimated Damage Costs from Delayed Responses: ${
+            report['estimated_damage_costs']:,.2f}")
+
+
+# -------------------------------
+# Main execution block
+# -------------------------------
+if __name__ == "__main__":
+    # Read the wildfire data CSV for the current wildfire season (2024)
+    # Ensure the CSV file has columns: timestamp, fire_start_time, location,
+    # severity.
+    try:
+        df_wildfire = pd.read_csv(DATA_FILENAME)
+    except Exception as e:
+        print("Error reading the CSV file:", e)
+        exit(1)
+
+    # Run the simulation with the intentional miss policy for low severity
+    # events.
+    allowed_low_misses = max(0, len(df_wildfire) - len(resource_pool))
+    report, incident_logs = simulate_deployment(
+        df_wildfire, allowed_low_misses)
+
+    print_summary_report(report)
+
+    # # Print detailed incident report
+    # print_incident_report(incident_logs)
