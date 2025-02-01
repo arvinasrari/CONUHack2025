@@ -1,9 +1,11 @@
-import pandas as pd
+# import pandas as pd
+import csv
 from datetime import datetime
 
 from typing import List
 
-DATA_FILENAME = 'Data/current_wildfiredata.csv'
+DATA_FILENAME = "Data/current_wildfiredata.csv"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # -------------------------------
 # Define our firefighting resources
@@ -71,35 +73,34 @@ def select_resource(available_resources, severity):
             r["operational_cost"], r["deployment_minutes"]))
         return available_resources[0]
 
+def sort_data(wildfire_data):
+    # Sort events by report time; if same time, then high severity events
+    # first.
+
+    # Define severity order for sorting
+    severity_order = {"high": 1, "medium": 2, "low": 3}
+
+    wildfire_data.sort(
+        key=lambda x: (datetime.strptime(x["timestamp"], DATE_FORMAT), severity_order[x["severity"]])
+    )
+
+
 # -------------------------------
 # Simulation of resource deployment (non-reusable units) with logging
 # and with an intentional miss policy for the first few low-severity events.
 # -------------------------------
 
-
-def simulate_deployment(df_events, allowed_low_misses):
+def simulate_deployment(wildfire_json):
     """
     Given a dataframe of wildfire events (with columns: timestamp, fire_start_time, location, severity),
     simulate resource assignment. Each resource is used only once.
 
     Policy change: For low severity events, intentionally "miss" (i.e. do not assign a resource)
-    for the first `allowed_low_misses` occurrences, even if a resource is available.
+    for the first low occurrences where the resource pool is lower than the number of events
 
     Returns a summary report and a list of incident logs.
     """
-    # Convert timestamp columns to datetime objects
-    df_events['timestamp'] = pd.to_datetime(df_events['timestamp'])
-    df_events['fire_start_time'] = pd.to_datetime(df_events['fire_start_time'])
-
-    # Sort events by report time; if same time, then high severity events
-    # first.
-    severity_order = {"high": 0, "medium": 1, "low": 2}
-    df_events.sort_values(
-        by=["timestamp", "severity"],
-        key=lambda col: col.map(
-            severity_order) if col.name == "severity" else col,
-        inplace=True
-    )
+    sort_data(wildfire_json)
 
     total_operational_cost = 0
     total_damage_cost = 0
@@ -112,6 +113,7 @@ def simulate_deployment(df_events, allowed_low_misses):
 
     # Policy: keep track of how many low severity events have been
     # intentionally missed.
+    allowed_low_misses = max(0, len(wildfire_json) - len(resource_pool))
     low_missed_count = 0
 
     # Create a copy of the resource pool
@@ -121,7 +123,11 @@ def simulate_deployment(df_events, allowed_low_misses):
     incident_logs = []
 
     # Process each event one by one
-    for idx, event in df_events.iterrows():
+    for idx, event in enumerate(wildfire_json):
+        # Convert timestamp columns to datetime objects
+        event['timestamp'] = datetime.strptime(event['timestamp'], DATE_FORMAT)
+        # event['fire_start_time'] = datetime.strptime(event['fire_start_time'], DATE_FORMAT)
+
         severity = event['severity'].lower()  # ensure lower-case
         event_time = event['timestamp']
         location = event.get('location', 'Unknown')
@@ -176,6 +182,18 @@ def simulate_deployment(df_events, allowed_low_misses):
     }
 
     return report, incident_logs
+
+# Read the CSV file and convert it to a JSON file
+def csv_to_json(csv_filename):
+    # Open the CSV file and read it
+    with open(csv_filename, mode='r', newline='', encoding='utf-8') as csvfile:
+        csvreader = csv.DictReader(csvfile)
+        
+        # Convert CSV data to a list of dictionaries
+        data = [row for row in csvreader]
+    
+    return data
+
 
 # -------------------------------
 # Function to print incident details
@@ -233,16 +251,16 @@ if __name__ == "__main__":
     # Ensure the CSV file has columns: timestamp, fire_start_time, location,
     # severity.
     try:
-        df_wildfire = pd.read_csv(DATA_FILENAME)
+        # wildfire_json = pd.read_csv(DATA_FILENAME).to_json()
+        wildfire_json = csv_to_json(DATA_FILENAME)
     except Exception as e:
         print("Error reading the CSV file:", e)
         exit(1)
 
     # Run the simulation with the intentional miss policy for low severity
     # events.
-    allowed_low_misses = max(0, len(df_wildfire) - len(resource_pool))
     report, incident_logs = simulate_deployment(
-        df_wildfire, allowed_low_misses)
+        wildfire_json)
 
     print_summary_report(report)
 
