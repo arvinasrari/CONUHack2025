@@ -1,6 +1,10 @@
 import pandas as pd
 from datetime import datetime
 
+from typing import List
+
+DATA_FILENAME = 'Data/current_wildfiredata.csv'
+
 # -------------------------------
 # Define our firefighting resources
 # -------------------------------
@@ -65,7 +69,7 @@ def select_resource(available_resources, severity):
 # Simulation of resource deployment (non-reusable units) with logging
 # and with an intentional miss policy for the first few low-severity events.
 # -------------------------------
-def simulate_deployment(df_events, allowed_low_misses=4):
+def simulate_deployment(df_events, allowed_low_misses):
     """
     Given a dataframe of wildfire events (with columns: timestamp, fire_start_time, location, severity),
     simulate resource assignment. Each resource is used only once.
@@ -153,14 +157,10 @@ def simulate_deployment(df_events, allowed_low_misses=4):
     
     # Prepare the summary report dictionary
     report = {
-        "Number of fires addressed": addressed_count,
-        "Number of fires delayed (missed responses)": missed_count,
-        "Total operational costs": total_operational_cost,
-        "Estimated damage costs from delayed responses": total_damage_cost,
-        "Fire severity report": {
-            "addressed": addressed_by_severity,
-            "missed": missed_by_severity
-        }
+        "fires_addressed": addressed_by_severity,
+        "fires_delayed": missed_by_severity,
+        "operational_costs": total_operational_cost,
+        "estimated_damage_costs": total_damage_cost,
     }
     
     return report, incident_logs
@@ -182,6 +182,26 @@ def print_incident_report(incident_logs):
             unit_info = f"--> {log['action']}"
         print(f"{event_info} {unit_info}")
 
+def print_summary_report(report):
+    """
+    Prints the wildfire response summary report in a structured format.
+    
+    Args:
+        report (dict): A dictionary containing fire response data.
+    """
+    print("----- Wildfire Response Report -----")
+    print("Fires Addressed:")
+    for severity, count in report["fires_addressed"].items():
+        print(f"  {severity.capitalize()}: {count}")
+
+    print("\nFires Delayed:")
+    for severity, count in report["fires_delayed"].items():
+        print(f"  {severity.capitalize()}: {count}")
+
+    print(f"\nTotal Operational Costs: ${report['operational_costs']:,.2f}")
+    print(f"Estimated Damage Costs from Delayed Responses: ${report['estimated_damage_costs']:,.2f}")
+
+
 # -------------------------------
 # Main execution block
 # -------------------------------
@@ -189,25 +209,16 @@ if __name__ == "__main__":
     # Read the wildfire data CSV for the current wildfire season (2024)
     # Ensure the CSV file has columns: timestamp, fire_start_time, location, severity.
     try:
-        df_wildfire = pd.read_csv("current_wildfiredata.csv")
+        df_wildfire = pd.read_csv(DATA_FILENAME)
     except Exception as e:
         print("Error reading the CSV file:", e)
         exit(1)
     
     # Run the simulation with the intentional miss policy for low severity events.
-    report, incident_logs = simulate_deployment(df_wildfire, allowed_low_misses=4)
+    allowed_low_misses = max(0, len(df_wildfire) - len(resource_pool))
+    report, incident_logs = simulate_deployment(df_wildfire, allowed_low_misses)
     
-    # Display the summary report
-    print("----- Wildfire Response Report -----")
-    print(f"Number of fires addressed: {report['Number of fires addressed']}")
-    print(f"Number of fires delayed (missed responses): {report['Number of fires delayed (missed responses)']}")
-    print(f"Total operational costs: ${report['Total operational costs']}")
-    print(f"Estimated damage costs from delayed responses: ${report['Estimated damage costs from delayed responses']}")
-    print("Fire severity report (addressed vs. missed):")
-    for sev in ["low", "medium", "high"]:
-        addressed = report['Fire severity report']['addressed'][sev]
-        missed = report['Fire severity report']['missed'][sev]
-        print(f"  {sev.capitalize()}: Addressed = {addressed}, Missed = {missed}")
+    print_summary_report(report)
     
-    # Print detailed incident report
-    print_incident_report(incident_logs)
+    # # Print detailed incident report
+    # print_incident_report(incident_logs)
